@@ -1,0 +1,160 @@
+#!/bin/bash
+# Starts the agent in a terminal. Hyprland runs this when the AI scratchpad is
+# opened and has no window in it; Service.qml sets that up. The settings are
+# read here, at that moment, so a change applies to the next terminal without
+# anything having to be reloaded.
+#
+#   ai-scratchpad                  start the agent, in a terminal
+#   ai-scratchpad --shell          what that terminal runs: the agent, then a shell
+#   ai-scratchpad --dirs           list the folders that the path typed so far,
+#                                  in $AI_SCRATCHPAD_DIRS, may mean
+#   ai-scratchpad --agents <cmd…>  print which of these commands are installed
+#   ai-scratchpad --running        print how many agent terminals are open
+#   ai-scratchpad --restart        close them and start the agent anew
+#   ai-scratchpad --choose-default ask for Omarchy's default agent, if it has none
+
+config="$HOME/.config/omarchy/extensions/ai-scratchpad.json"
+
+# setting <name> <default>; the defaults match Config.js.
+setting() {
+  local value=""
+  [[ -r $config ]] && value=$(jq -r --arg name "$1" '.[$name] | strings' "$config" 2>/dev/null)
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value:-$2}"
+}
+
+# Omarchy's launcher for its default agent, as in Config.js.
+omarchy="omarchy agent --inline --pick"
+
+# The agent terminals in the scratchpad, by window address. Other windows
+# that were moved there are not ours. Service.qml names the workspace.
+workspace="special:ai"
+terminals() {
+  hyprctl clients -j 2>/dev/null |
+    jq -r --arg workspace "$workspace" '.[] | select(.workspace.name == $workspace and .class == "org.omarchy.ai") | .address'
+}
+
+short() {
+  if [[ $1 == "$HOME" || $1 == "$HOME"/* ]]; then printf '~%s\n' "${1#"$HOME"}"; else printf '%s\n' "$1"; fi
+}
+
+case "${1:-}" in
+  --dirs)
+    # The typed path comes in the environment and is taken apart without
+    # dirname or basename: other users can read a process's arguments.
+    path="${AI_SCRATCHPAD_DIRS-}"
+    [[ -z $path ]] && path="~/"
+    [[ $path == "~" ]] && path="~/"
+    [[ $path == "~/"* ]] && path="$HOME/${path#"~/"}"
+    if [[ $path == */ ]]; then
+      dir="${path%/}"; prefix=""
+    else
+      dir="${path%/*}"; prefix="${path##*/}"
+      [[ $path == */* ]] || dir="."
+    fi
+    [[ $dir == / ]] && dir=""
+    [[ -d ${dir:-/} ]] || exit 0
+    # A path that ends in "/" is a folder itself, and comes first.
+    [[ -z $prefix ]] && short "${dir:-/}"
+    shopt -s nullglob nocasematch
+    [[ $prefix == .* ]] && shopt -s dotglob
+    count=0
+    for pass in starts contains; do
+      for entry in "$dir"/*/; do
+        entry="${entry%/}"; name="${entry##*/}"
+        if [[ $pass == starts ]]; then [[ $name == "$prefix"* ]] || continue
+        else [[ $name != "$prefix"* && $name == *"$prefix"* ]] || continue; fi
+        short "$entry"
+        (( ++count >= 200 )) && exit 0
+      done
+      if [[ -z $prefix ]]; then break; fi
+    done
+    ;;
+  --agents)
+    shift
+    # Interactive, like the terminal the agent starts in, so that a PATH set
+    # in ~/.bashrc counts.
+    bash -ic 'for command; do command -v "$command" >/dev/null 2>&1 && echo "$command"; done' _ "$@" 2>/dev/null </dev/null
+    ;;
+  --running)
+    terminals | grep -c . || true
+    ;;
+  --restart)
+    for address in $(terminals); do
+      [[ $address =~ ^0x[0-9a-f]+$ ]] || continue
+      hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null
+    done
+    # A terminal may ask before it closes a running program: give it a moment.
+    for _ in {1..30}; do
+      [[ -z $(terminals) ]] && break
+      sleep 0.1
+    done
+    if [[ -n $(terminals) ]]; then
+      notify-send -a "AI Scratchpad" "AI Scratchpad" "The terminal is still open. Close it, and the agent starts anew the next time the scratchpad is opened."
+      exit 1
+    fi
+    # Started here, not left to the next opening: the scratchpad may be on
+    # screen, or hold other windows and so never be opened empty.
+    hyprctl dispatch "hl.dsp.exec_cmd($(jq -rn --arg command "$(realpath -- "$0")" '$command | @json'), { workspace = \"$workspace silent\" })" >/dev/null
+    ;;
+  --choose-default)
+    # Omarchy ships with no default agent, and its own picker starts the
+    # chosen one in a window of its own: the scratchpad would be left with a
+    # bare shell. So the choice is made here, in the terminal, and Omarchy
+    # installs the agent if need be, remembers it and runs it in place.
+    # Exits 0 to go on to the agent, 1 when nothing was chosen, 2 when the
+    # agent has run already.
+    [[ -n $(omarchy-default-agent 2>/dev/null) ]] && exit 0
+    command -v omarchy-default-agent >/dev/null && command -v gum >/dev/null || exit 0
+    # Its usage line names the agents it knows: "<pi|omp|opencode|...>".
+    mapfile -t agents < <(omarchy-default-agent --help 2>&1 | grep -o '<[^>]*|[^>]*>' | head -n 1 | tr -d '<>' | tr '|' '\n' | grep -E '^[a-z0-9-]+$')
+    ((${#agents[@]})) || exit 0
+    echo "Omarchy has no default agent yet. Which one should the scratchpad run?"
+    echo "It becomes Omarchy's default, and is installed if it is not yet. Esc closes this."
+    echo
+    choice=$(gum choose --height 15 "${agents[@]}") || exit 1
+    [[ -n $choice ]] || exit 1
+    omarchy-default-agent --install "$choice"
+    # An Omarchy that does not install in place: go on to its own picker.
+    [[ -n $(omarchy-default-agent 2>/dev/null) ]] || exit 0
+    exit 2
+    ;;
+  "")
+    # The terminal is told nothing but to come back here: the folder and the
+    # agent stay out of its arguments, which other users can read.
+    exec uwsm-app -- xdg-terminal-exec --app-id=org.omarchy.ai -e "$(realpath -- "$0")" --shell
+    ;;
+  --shell)
+    # A config that does not read is not replaced by the defaults: they would
+    # start another agent than the one chosen, one that may not ask first.
+    if [[ -s $config ]] && ! jq -e 'type == "object"' "$config" >/dev/null 2>&1; then
+      echo "AI Scratchpad: ~${config#"$HOME"} is not valid JSON, so no agent is started."
+      echo "Fix the file, close this terminal and open the scratchpad again."
+      cd -- "$HOME" && exec bash
+    fi
+    agent=$(setting agent "$omarchy")
+    folder=$(setting folder "~/Work")
+    [[ $folder == "~" ]] && folder="$HOME"
+    [[ $folder == "~/"* ]] && folder="$HOME/${folder#"~/"}"
+    [[ -d $folder ]] || folder="$HOME"
+    cd -- "$folder" || exit 1
+    run="$agent"
+    if [[ $agent == "$omarchy" ]]; then
+      run="$(printf '%q' "$(realpath -- "$0")") --choose-default; case \$? in 0) $agent ;; 1) exit ;; esac"
+    fi
+    # Interactive, so that the PATH and aliases of ~/.bashrc count. Quitting
+    # the agent leaves a shell behind; closing the window empties the
+    # scratchpad, and the next time it is opened this runs again.
+    # The command may hold something private, such as KEY=... in front of the
+    # agent, and other users can read a process's arguments: it reaches the
+    # shell in the environment, which only we can read, and is taken out of
+    # it again before the agent starts.
+    AI_SCRATCHPAD_RUN="$run" exec bash -ic 'run=$AI_SCRATCHPAD_RUN; unset AI_SCRATCHPAD_RUN; eval "$run"; unset run; exec bash'
+    ;;
+  *)
+    echo "usage: ai-scratchpad [--shell | --dirs | --agents <command>... | --running | --restart | --choose-default]" >&2
+    exit 2
+    ;;
+esac
+exit 0

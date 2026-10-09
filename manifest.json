@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "mani4.ai-scratchpad",
+  "name": "AI Scratchpad",
+  "version": "1.0.0",
+  "author": "MaNi4",
+  "license": "MIT",
+  "description": "A scratchpad workspace with your AI agent in it. One key slides in a full-screen terminal running Claude Code, Codex or any other agent in the folder you choose; the same key hides it again",
+  "kinds": [
+    "overlay",
+    "service"
+  ],
+  "entryPoints": {
+    "overlay": "Settings.qml",
+    "service": "Service.qml"
+  },
+  "homepage": "https://github.com/MaNi4/omarchy-ai-scratchpad",
+  "keepLoaded": true
+}
